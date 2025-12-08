@@ -1,0 +1,238 @@
+const Sale = require("../models/sale");
+const utils = require("../utils/queryUtils");
+const fs = require("fs");
+const csv = require("csv-parser");
+const path = require("path");
+
+function buildFilter(query) {
+  const filter = {};
+
+  if (query.q) {
+    const term = query.q.toString();
+    filter.$or = [
+      { customerName: { $regex: term, $options: "i" } },
+      { phoneNumber: { $regex: term, $options: "i" } },
+    ];
+  }
+
+  if (query.region) {
+    const regions = utils.splitCSV(query.region).map((s) => s.toLowerCase());
+    filter.customerRegion = { $in: regions };
+  }
+  if (query.gender) {
+    const genders = utils.splitCSV(query.gender).map((s) => s.toLowerCase());
+    filter.gender = { $in: genders };
+  }
+
+  const ageMin = utils.toNumber(query.ageMin);
+  const ageMax = utils.toNumber(query.ageMax);
+  if (!isNaN(ageMin) || !isNaN(ageMax)) {
+    filter.age = {};
+    if (!isNaN(ageMin)) filter.age.$gte = ageMin;
+    if (!isNaN(ageMax)) filter.age.$lte = ageMax;
+  }
+
+  if (query.category) {
+    const cats = utils.splitCSV(query.category).map((s) => s.toLowerCase());
+    filter.productCategory = { $in: cats };
+  }
+
+  if (query.tags) {
+    const tags = utils.splitCSV(query.tags).map((s) => s.toLowerCase());
+    filter.tags = { $all: tags };
+  }
+
+  if (query.paymentMethod) {
+    filter.paymentMethod = query.paymentMethod;
+  }
+
+  if (query.dateFrom || query.dateTo) {
+    const from = utils.toDate(query.dateFrom);
+    const to = utils.toDate(query.dateTo);
+    filter.date = {};
+    if (from) filter.date.$gte = from;
+    if (to) filter.date.$lte = to;
+  }
+
+  return filter;
+}
+
+function buildSort(sortBy, sortOrder) {
+  if (!sortBy) return { date: -1 };
+  const order = (sortOrder || "desc").toLowerCase() === "asc" ? 1 : -1;
+  const map = {
+    date: { date: order },
+    quantity: { quantity: order },
+    customerName: { customerName: order },
+  };
+  return map[sortBy] || { date: -1 };
+}
+
+exports.querySales = async (query) => {
+  const page = Math.max(1, parseInt(query.page || "1", 10));
+  // clamp pageSize to reasonable max to avoid huge responses
+  const pageSize = Math.min(200, Math.max(1, parseInt(query.pageSize || "10", 10)));
+  const skip = (page - 1) * pageSize;
+
+  const filter = buildFilter(query);
+  const sort = buildSort(query.sortBy, query.sortOrder);
+
+  const [total, items] = await Promise.all([
+    Sale.countDocuments(filter),
+    Sale.find(filter).sort(sort).skip(skip).limit(pageSize).lean(),
+  ]);
+
+  const totalPages = Math.ceil(total / pageSize) || 1;
+  return { data: items, meta: { total, totalPages, page, pageSize } };
+};
+
+/**
+ * Insert array of docs in chunks to avoid creating huge in-memory inserts.
+ * Returns { insertedCount, errors }.
+ */
+async function insertInBatches(docs, batchSize = 500) {
+  let insertedCount = 0;
+  const errors = [];
+
+  for (let i = 0; i < docs.length; i += batchSize) {
+    const chunk = docs.slice(i, i + batchSize);
+    try {
+      const res = await Sale.insertMany(chunk, { ordered: false });
+      insertedCount += Array.isArray(res) ? res.length : 0;
+    } catch (e) {
+      // ordered: false means some may have been inserted; try to count insertedDocs if present
+      if (e && e.insertedDocs) {
+        insertedCount += e.insertedDocs.length;
+      }
+      errors.push(e.message || String(e));
+    }
+  }
+  return { insertedCount, errors };
+}
+
+/**
+ * Import array of plain objects (from CSV or other sources) into Sale collection.
+ * Tries to coerce common numeric/date fields.
+ * Returns { insertedCount, errors }.
+ */
+exports.importRecords = async (records, options = {}) => {
+  if (!Array.isArray(records) || records.length === 0) return { insertedCount: 0, errors: [] };
+
+  // map rows to docs with minimal coercion
+  const docs = records.map((r) => {
+    const doc = {
+      customerName:
+        r.customerName || r.name || r.CustomerName || r.Customer || r["Customer Name"] || undefined,
+      phoneNumber: r.phoneNumber || r.phone || r.Phone || r["Phone Number"] || undefined,
+      customerRegion:
+        r.customerRegion || r.region || r.Region || r["Customer Region"] || undefined,
+      gender: r.gender || r.Gender || undefined,
+      age: utils.toNumber(r.age || r.Age),
+      productCategory:
+        r.productCategory || r.category || r.Category || r["Product Category"] || undefined,
+      tags: r.tags ? String(r.tags).split(/[;,]/).map((t) => t.trim()).filter(Boolean) : [],
+      paymentMethod: r.paymentMethod || r.payment || undefined,
+      date: utils.toDate(r.date || r.Date) || undefined,
+      quantity: utils.toNumber(r.quantity || r.qty || r.Quantity),
+      amount: utils.toNumber(r.amount || r.totalAmount || r.TotalAmount),
+      raw: r,
+    };
+    return doc;
+  });
+
+  const batchSize = options.batchSize || 500;
+  const res = await insertInBatches(docs, batchSize);
+  return res; // { insertedCount, errors }
+};
+
+/**
+ * Streaming import from CSV file path.
+ * - Parses CSV with csv-parser
+ * - Maps each row to a doc (same normalization as importRecords)
+ * - Inserts in batches to avoid OOM
+ * Returns { importedCount, errors }.
+ */
+exports.importFromCSVFile = async (filePath, options = {}) => {
+  const CHUNK_SIZE = options.batchSize || 500;
+  const insertedCount = { value: 0 };
+  const errors = [];
+
+  if (!filePath || !fs.existsSync(filePath)) return { importedCount: 0, errors: ["file-not-found"] };
+
+  return new Promise((resolve, reject) => {
+    const stream = fs.createReadStream(filePath).pipe(csv());
+    let buffer = [];
+
+    function mapRowToDoc(r) {
+      return {
+        customerName:
+          r.customerName || r.name || r.CustomerName || r.Customer || r["Customer Name"] || undefined,
+        phoneNumber: r.phoneNumber || r.phone || r.Phone || r["Phone Number"] || undefined,
+        customerRegion:
+          r.customerRegion || r.region || r.Region || r["Customer Region"] || undefined,
+        gender: r.gender || r.Gender || undefined,
+        age: utils.toNumber(r.age || r.Age),
+        productCategory:
+          r.productCategory || r.category || r.Category || r["Product Category"] || undefined,
+        tags: r.tags ? String(r.tags).split(/[;,]/).map((t) => t.trim()).filter(Boolean) : [],
+        paymentMethod: r.paymentMethod || r.payment || undefined,
+        date: utils.toDate(r.date || r.Date) || undefined,
+        quantity: utils.toNumber(r.quantity || r.qty || r.Quantity),
+        amount: utils.toNumber(r.amount || r.totalAmount || r.TotalAmount),
+        raw: r,
+      };
+    }
+
+    let paused = false;
+
+    async function flushBuffer() {
+      if (buffer.length === 0) return;
+      const toInsert = buffer;
+      buffer = [];
+      try {
+        const res = await Sale.insertMany(toInsert, { ordered: false });
+        insertedCount.value += Array.isArray(res) ? res.length : 0;
+      } catch (e) {
+        if (e && e.insertedDocs) insertedCount.value += e.insertedDocs.length;
+        errors.push(e.message || String(e));
+      }
+    }
+
+    stream
+      .on("data", async (row) => {
+        // map and push to buffer
+        const doc = mapRowToDoc(row);
+        buffer.push(doc);
+
+        if (buffer.length >= CHUNK_SIZE && !paused) {
+          // pause the stream, flush, then resume
+          paused = true;
+          stream.pause();
+          flushBuffer()
+            .then(() => {
+              paused = false;
+              stream.resume();
+            })
+            .catch((err) => {
+              paused = false;
+              errors.push(err.message || String(err));
+              stream.resume();
+            });
+        }
+      })
+      .on("end", async () => {
+        try {
+          // final flush
+          await flushBuffer();
+          resolve({ importedCount: insertedCount.value, errors });
+        } catch (e) {
+          errors.push(e.message || String(e));
+          resolve({ importedCount: insertedCount.value, errors });
+        }
+      })
+      .on("error", (err) => {
+        errors.push(err.message || String(err));
+        reject({ importedCount: insertedCount.value, errors });
+      });
+  });
+};
