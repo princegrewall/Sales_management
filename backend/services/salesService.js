@@ -70,8 +70,7 @@ function buildSort(sortBy, sortOrder) {
 
 exports.querySales = async (query) => {
   const page = Math.max(1, parseInt(query.page || "1", 10));
-  // clamp pageSize to reasonable max to avoid huge responses
-  const pageSize = Math.min(200, Math.max(1, parseInt(query.pageSize || "10", 10)));
+  const pageSize = Math.min(200, Math.max(1, parseInt(query.pageSize || "20", 10)));
   const skip = (page - 1) * pageSize;
 
   const filter = buildFilter(query);
@@ -100,7 +99,6 @@ async function insertInBatches(docs, batchSize = 500) {
       const res = await Sale.insertMany(chunk, { ordered: false });
       insertedCount += Array.isArray(res) ? res.length : 0;
     } catch (e) {
-      // ordered: false means some may have been inserted; try to count insertedDocs if present
       if (e && e.insertedDocs) {
         insertedCount += e.insertedDocs.length;
       }
@@ -112,29 +110,42 @@ async function insertInBatches(docs, batchSize = 500) {
 
 /**
  * Import array of plain objects (from CSV or other sources) into Sale collection.
- * Tries to coerce common numeric/date fields.
+ * Maps CSV columns to database schema.
  * Returns { insertedCount, errors }.
  */
 exports.importRecords = async (records, options = {}) => {
   if (!Array.isArray(records) || records.length === 0) return { insertedCount: 0, errors: [] };
 
-  // map rows to docs with minimal coercion
   const docs = records.map((r) => {
     const doc = {
-      customerName:
-        r.customerName || r.name || r.CustomerName || r.Customer || r["Customer Name"] || undefined,
-      phoneNumber: r.phoneNumber || r.phone || r.Phone || r["Phone Number"] || undefined,
-      customerRegion:
-        r.customerRegion || r.region || r.Region || r["Customer Region"] || undefined,
-      gender: r.gender || r.Gender || undefined,
-      age: utils.toNumber(r.age || r.Age),
-      productCategory:
-        r.productCategory || r.category || r.Category || r["Product Category"] || undefined,
-      tags: r.tags ? String(r.tags).split(/[;,]/).map((t) => t.trim()).filter(Boolean) : [],
-      paymentMethod: r.paymentMethod || r.payment || undefined,
-      date: utils.toDate(r.date || r.Date) || undefined,
-      quantity: utils.toNumber(r.quantity || r.qty || r.Quantity),
-      amount: utils.toNumber(r.amount || r.totalAmount || r.TotalAmount),
+      transactionId: r['Transaction ID'],
+      date: utils.toDate(r['Date']) || undefined,
+      customerId: r['Customer ID'],
+      customerName: r['Customer Name'] || undefined,
+      phoneNumber: r['Phone Number'] || undefined,
+      gender: r['Gender'] || undefined,
+      age: utils.toNumber(r['Age']),
+      customerRegion: r['Customer Region'] || undefined,
+      customerType: r['Customer Type'] || undefined,
+      productId: r['Product ID'],
+      productName: r['Product Name'] || undefined,
+      brand: r['Brand'] || undefined,
+      productCategory: r['Product Category'] || undefined,
+      tags: r['Tags'] ? String(r['Tags']).split(/[;,]/).map((t) => t.trim()).filter(Boolean) : [],
+      quantity: utils.toNumber(r['Quantity']),
+      pricePerUnit: utils.toNumber(r['Price per Unit']),
+      discountPercentage: utils.toNumber(r['Discount Percentage']),
+      //amount: utils.toNumber(r['Total Amount']),
+      totalAmount: utils.toNumber(r['Total Amount']),
+
+      finalAmount: utils.toNumber(r['Final Amount']),
+      paymentMethod: r['Payment Method'] || undefined,
+      orderStatus: r['Order Status'] || undefined,
+      deliveryType: r['Delivery Type'] || undefined,
+      storeId: r['Store ID'],
+      storeLocation: r['Store Location'] || undefined,
+      salespersonId: r['Salesperson ID'],
+      employeeName: r['Employee Name'] || undefined,
       raw: r,
     };
     return doc;
@@ -142,13 +153,13 @@ exports.importRecords = async (records, options = {}) => {
 
   const batchSize = options.batchSize || 500;
   const res = await insertInBatches(docs, batchSize);
-  return res; // { insertedCount, errors }
+  return res;
 };
 
 /**
  * Streaming import from CSV file path.
  * - Parses CSV with csv-parser
- * - Maps each row to a doc (same normalization as importRecords)
+ * - Maps each row to database schema
  * - Inserts in batches to avoid OOM
  * Returns { importedCount, errors }.
  */
@@ -165,20 +176,34 @@ exports.importFromCSVFile = async (filePath, options = {}) => {
 
     function mapRowToDoc(r) {
       return {
-        customerName:
-          r.customerName || r.name || r.CustomerName || r.Customer || r["Customer Name"] || undefined,
-        phoneNumber: r.phoneNumber || r.phone || r.Phone || r["Phone Number"] || undefined,
-        customerRegion:
-          r.customerRegion || r.region || r.Region || r["Customer Region"] || undefined,
-        gender: r.gender || r.Gender || undefined,
-        age: utils.toNumber(r.age || r.Age),
-        productCategory:
-          r.productCategory || r.category || r.Category || r["Product Category"] || undefined,
-        tags: r.tags ? String(r.tags).split(/[;,]/).map((t) => t.trim()).filter(Boolean) : [],
-        paymentMethod: r.paymentMethod || r.payment || undefined,
-        date: utils.toDate(r.date || r.Date) || undefined,
-        quantity: utils.toNumber(r.quantity || r.qty || r.Quantity),
-        amount: utils.toNumber(r.amount || r.totalAmount || r.TotalAmount),
+        transactionId: r['Transaction ID'],
+        date: utils.toDate(r['Date']) || undefined,
+        customerId: r['Customer ID'],
+        customerName: r['Customer Name'] || undefined,
+        phoneNumber: r['Phone Number'] || undefined,
+        gender: r['Gender'] || undefined,
+        age: utils.toNumber(r['Age']),
+        customerRegion: r['Customer Region'] || undefined,
+        customerType: r['Customer Type'] || undefined,
+        productId: r['Product ID'],
+        productName: r['Product Name'] || undefined,
+        brand: r['Brand'] || undefined,
+        productCategory: r['Product Category'] || undefined,
+        tags: r['Tags'] ? String(r['Tags']).split(/[;,]/).map((t) => t.trim()).filter(Boolean) : [],
+        quantity: utils.toNumber(r['Quantity']),
+        pricePerUnit: utils.toNumber(r['Price per Unit']),
+        discountPercentage: utils.toNumber(r['Discount Percentage']),
+        amount: utils.toNumber(r['Total Amount']),
+        //totalAmount: utils.toNumber(r['Total Amount']),
+
+        finalAmount: utils.toNumber(r['Final Amount']),
+        paymentMethod: r['Payment Method'] || undefined,
+        orderStatus: r['Order Status'] || undefined,
+        deliveryType: r['Delivery Type'] || undefined,
+        storeId: r['Store ID'],
+        storeLocation: r['Store Location'] || undefined,
+        salespersonId: r['Salesperson ID'],
+        employeeName: r['Employee Name'] || undefined,
         raw: r,
       };
     }
@@ -200,12 +225,10 @@ exports.importFromCSVFile = async (filePath, options = {}) => {
 
     stream
       .on("data", async (row) => {
-        // map and push to buffer
         const doc = mapRowToDoc(row);
         buffer.push(doc);
 
         if (buffer.length >= CHUNK_SIZE && !paused) {
-          // pause the stream, flush, then resume
           paused = true;
           stream.pause();
           flushBuffer()
@@ -222,7 +245,6 @@ exports.importFromCSVFile = async (filePath, options = {}) => {
       })
       .on("end", async () => {
         try {
-          // final flush
           await flushBuffer();
           resolve({ importedCount: insertedCount.value, errors });
         } catch (e) {

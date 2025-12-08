@@ -1,5 +1,5 @@
-import { useState, useMemo, useCallback, useEffect } from 'react';
-import { SalesRecord, mockData } from '@/data/mockData';
+import { useState, useMemo, useCallback, useEffect, useRef } from 'react';
+import { SalesRecord } from '@/data/mockData';
 
 export interface Filters {
   search: string;
@@ -12,7 +12,13 @@ export interface Filters {
   dateRange: { start: string; end: string } | null;
 }
 
-export type SortOption = 'date-desc' | 'date-asc' | 'quantity-desc' | 'quantity-asc' | 'name-asc' | 'name-desc';
+export type SortOption =
+  | 'date-desc'
+  | 'date-asc'
+  | 'quantity-desc'
+  | 'quantity-asc'
+  | 'name-asc'
+  | 'name-desc';
 
 const initialFilters: Filters = {
   search: '',
@@ -31,214 +37,206 @@ function parseAgeRange(range: string): { min: number; max: number } {
   return { min, max };
 }
 
+function buildQuery(page: number, pageSize: number, filters: Filters, sortBy: SortOption) {
+  const params = new URLSearchParams();
+  params.set('page', String(page));
+  params.set('pageSize', String(pageSize));
+  params.set('sort', sortBy);
+
+  if (filters.search) params.set('search', filters.search);
+
+  // arrays -> repeated params: regions=North&regions=South
+  for (const r of filters.regions) params.append('regions', r);
+  for (const g of filters.genders) params.append('genders', g);
+  for (const a of filters.ageRanges) params.append('ageRanges', a);
+  for (const c of filters.categories) params.append('categories', c);
+  for (const t of filters.tags) params.append('tags', t);
+  for (const p of filters.paymentMethods) params.append('paymentMethods', p);
+
+  // Optional: if backend expects numeric range params instead of "ageRanges"
+  // uncomment and adapt if needed (this uses the first selected ageRange)
+  /*
+  if (filters.ageRanges.length > 0) {
+    const { min, max } = parseAgeRange(filters.ageRanges[0]);
+    params.set('ageMin', String(min));
+    params.set('ageMax', String(max));
+  }
+  */
+
+  if (filters.dateRange) {
+    if (filters.dateRange.start) params.set('start', new Date(filters.dateRange.start).toISOString());
+    if (filters.dateRange.end) params.set('end', new Date(filters.dateRange.end).toISOString());
+  }
+
+  return params.toString();
+}
+
+
 export function useSalesData() {
-  // default to backend port used by backend (4004) — server may set PORT via .env
-  const API_BASE = (import.meta.env.VITE_API_URL as string) || 'http://localhost:4000';
+  const API_BASE =
+    (import.meta.env.VITE_API_URL as string) || 'http://localhost:4000';
 
-  // start with bundled mockData so UI shows something if backend isn't reachable
-  const [allRecords, setAllRecords] = useState<SalesRecord[]>(mockData);
+  // Backend state
+  const [allRecords, setAllRecords] = useState<SalesRecord[]>([]);
   const [loadingRemote, setLoadingRemote] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize] = useState(10);
+  const [serverMeta, setServerMeta] = useState<null | {
+    total?: number;
+    totalPages?: number;
+    page?: number;
+    pageSize?: number;
+    // optional: server-provided aggregates
+    aggregates?: { totalUnits?: number; totalAmount?: number; totalDiscount?: number };
+  }>(null);
 
-  // fetch records from backend if available
-  useEffect(() => {
-    let mounted = true;
-    async function load() {
-      setLoadingRemote(true);
-      try {
-        const res = await fetch(`${API_BASE}/api/sales`);
-        if (!res.ok) throw new Error('no remote');
-        const json = await res.json();
-        // backend returns { data, meta }
-        const rows = Array.isArray(json.data) ? json.data : json;
-        if (mounted && rows.length) setAllRecords(rows as SalesRecord[]);
-      } catch (e) {
-        // keep mockData
-      } finally {
-        if (mounted) setLoadingRemote(false);
-      }
-    }
-    load();
-    return () => { mounted = false; };
-  }, [API_BASE]);
-
-  const refresh = useCallback(async () => {
-    try {
-      const res = await fetch(`${API_BASE}/api/sales`);
-      if (!res.ok) return;
-      const json = await res.json();
-      const rows = Array.isArray(json.data) ? json.data : json;
-      setAllRecords(rows as SalesRecord[]);
-    } catch (e) {
-      // ignore
-    }
-  }, [API_BASE]);
-
-  const uploadFile = useCallback(async (file: File) => {
-    const form = new FormData();
-    form.append('file', file);
-    const res = await fetch(`${API_BASE}/api/sales/upload`, { method: 'POST', body: form });
-    if (res.ok) {
-      // after successful upload, refresh remote data
-      await refresh();
-    } else {
-      const text = await res.text();
-      throw new Error(text || 'Upload failed');
-    }
-  }, [API_BASE, refresh]);
+  // Local UI/filtering/sorting state
   const [filters, setFilters] = useState<Filters>(initialFilters);
   const [sortBy, setSortBy] = useState<SortOption>('name-asc');
-  const [currentPage, setCurrentPage] = useState(1);
-  const pageSize = 10;
 
-  const filteredData = useMemo(() => {
-  let result = [...allRecords];
+  // debounce ref
+  const fetchTimeout = useRef<number | null>(null);
+  const mountedRef = useRef(true);
 
-    // Search filter
-    if (filters.search) {
-      const searchLower = filters.search.toLowerCase();
-      result = result.filter((item) => {
-        const name = item.customerName ? String(item.customerName).toLowerCase() : '';
-        const phone = item.phoneNumber ? String(item.phoneNumber) : '';
-        return name.includes(searchLower) || phone.includes(filters.search);
-      });
-    }
+  // Core fetch function used by effect + refresh
+  const fetchPage = useCallback(
+    async (page: number) => {
+      setLoadingRemote(true);
+      setError(null);
 
-    // Region filter
-    if (filters.regions.length > 0) {
-      result = result.filter((item) => filters.regions.includes(item.customerRegion));
-    }
+      try {
+        const qs = buildQuery(page, pageSize, filters, sortBy);
+        const res = await fetch(`${API_BASE}/api/sales?${qs}`);
+        if (!res.ok) throw new Error(`Fetch failed: ${res.status}`);
 
-    // Gender filter
-    if (filters.genders.length > 0) {
-      result = result.filter((item) => filters.genders.includes(item.gender));
-    }
+        const json = await res.json();
 
-    // Age range filter
-    if (filters.ageRanges.length > 0) {
-      result = result.filter((item) => {
-        return filters.ageRanges.some((range) => {
-          const { min, max } = parseAgeRange(range);
-          return item.age >= min && item.age <= max;
-        });
-      });
-    }
-
-    // Category filter
-    if (filters.categories.length > 0) {
-      result = result.filter((item) => filters.categories.includes(item.productCategory));
-    }
-
-    // Tags filter
-    if (filters.tags.length > 0) {
-      result = result.filter((item) =>
-        filters.tags.some((tag) => item.tags.includes(tag))
-      );
-    }
-
-    // Payment method filter
-    if (filters.paymentMethods.length > 0) {
-      result = result.filter((item) => filters.paymentMethods.includes(item.paymentMethod));
-    }
-
-    // Date range filter
-    if (filters.dateRange) {
-      const { start, end } = filters.dateRange;
-      result = result.filter((item) => {
-        const itemDate = new Date(item.date);
-        const startDate = start ? new Date(start) : null;
-        const endDate = end ? new Date(end) : null;
-        
-        if (startDate && endDate) {
-          return itemDate >= startDate && itemDate <= endDate;
-        } else if (startDate) {
-          return itemDate >= startDate;
-        } else if (endDate) {
-          return itemDate <= endDate;
+        // expecting { meta: {...}, data: [...] } ideally
+        if (json && json.meta && Array.isArray(json.data)) {
+          if (!mountedRef.current) return;
+          setServerMeta(json.meta);
+          setCurrentPage(json.meta.page || page);
+          setAllRecords(json.data as SalesRecord[]);
+        } else {
+          // fallback: server returns raw array (no meta)
+          if (!mountedRef.current) return;
+          setServerMeta(null);
+          const rows = Array.isArray(json.data) ? json.data : json;
+          setAllRecords(rows as SalesRecord[]);
         }
-        return true;
+      } catch (err: any) {
+        if (!mountedRef.current) return;
+        setAllRecords([]);
+        setError(err.message || 'Backend not reachable');
+      } finally {
+        if (mountedRef.current) setLoadingRemote(false);
+      }
+    },
+    [API_BASE, filters, pageSize, sortBy]
+  );
+
+  // Fetch on mount and whenever currentPage / filters / sortBy / pageSize change (debounced)
+  useEffect(() => {
+    mountedRef.current = true;
+    if (fetchTimeout.current) window.clearTimeout(fetchTimeout.current);
+    fetchTimeout.current = window.setTimeout(() => {
+      fetchPage(currentPage);
+    }, 200); // 200ms debounce
+
+    return () => {
+      mountedRef.current = false;
+      if (fetchTimeout.current) window.clearTimeout(fetchTimeout.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentPage, pageSize, filters, sortBy, API_BASE, fetchPage]);
+
+  // Manual refresh (calls same fetch)
+  const refresh = useCallback(async () => {
+    await fetchPage(currentPage);
+  }, [fetchPage, currentPage]);
+
+  // Upload file and refresh page
+  const uploadFile = useCallback(
+    async (file: File) => {
+      const form = new FormData();
+      form.append('file', file);
+
+      const res = await fetch(`${API_BASE}/api/sales/upload`, {
+        method: 'POST',
+        body: form,
       });
-    }
 
-    return result;
-  }, [filters]);
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(text || 'Upload failed');
+      }
 
-  const sortedData = useMemo(() => {
-    const sorted = [...filteredData];
+      await refresh();
+    },
+    [API_BASE, refresh]
+  );
 
-    switch (sortBy) {
-      case 'date-desc':
-        sorted.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-        break;
-      case 'date-asc':
-        sorted.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
-        break;
-      case 'quantity-desc':
-        sorted.sort((a, b) => b.quantity - a.quantity);
-        break;
-      case 'quantity-asc':
-        sorted.sort((a, b) => a.quantity - b.quantity);
-        break;
-      case 'name-asc':
-        sorted.sort((a, b) => a.customerName.localeCompare(b.customerName));
-        break;
-      case 'name-desc':
-        sorted.sort((a, b) => b.customerName.localeCompare(a.customerName));
-        break;
-    }
-
-    return sorted;
-  }, [filteredData, sortBy]);
-
-  const paginatedData = useMemo(() => {
-    const startIndex = (currentPage - 1) * pageSize;
-    return sortedData.slice(startIndex, startIndex + pageSize);
-  }, [sortedData, currentPage]);
-
-  const totalPages = Math.ceil(sortedData.length / pageSize);
-
+  // Since server drives filtering/pagination, compute lightweight stats from server-provided aggregates if available.
+  // If server doesn't provide aggregates, we compute them from current page (may be partial) — consider adding an endpoint returning global aggregates.
   const stats = useMemo(() => {
+    if (serverMeta && (serverMeta as any).aggregates) {
+      const ag = (serverMeta as any).aggregates;
+      return {
+        totalUnits: ag.totalUnits ?? 0,
+        totalAmount: ag.totalAmount ?? 0,
+        totalDiscount: ag.totalDiscount ?? 0,
+        totalRecords: serverMeta.total ?? 0,
+      };
+    }
+
+    // fallback: compute from current page (note: partial)
     const getNumericField = (item: any, ...keys: string[]) => {
       for (const k of keys) {
-        const v = (item as any)[k];
-        if (v !== undefined && v !== null && !isNaN(Number(v))) return Number(v);
+        const v = item[k];
+        if (v !== undefined && v !== null && !isNaN(Number(v)))
+          return Number(v);
       }
       return 0;
     };
 
-    const totalUnits = filteredData.reduce((sum, item) => sum + (getNumericField(item, 'quantity') || 0), 0);
-    const totalAmount = filteredData.reduce((sum, item) => sum + getNumericField(item, 'amount', 'totalAmount'), 0);
-    const totalDiscount = filteredData.reduce((sum, item) => {
+    const totalUnits = allRecords.reduce((sum, item) => sum + (getNumericField(item, 'quantity') || 0), 0);
+    const totalAmount = allRecords.reduce((sum, item) => sum + getNumericField(item, 'amount', 'totalAmount'), 0);
+    const totalDiscount = allRecords.reduce((sum, item) => {
       const total = getNumericField(item, 'totalAmount', 'amount');
       const final = getNumericField(item, 'finalAmount') || total;
       return sum + (total - final);
     }, 0);
-    const totalRecords = filteredData.length;
+    const totalRecords = serverMeta?.total ?? allRecords.length;
 
-    return {
-      totalUnits,
-      totalAmount,
-      totalDiscount,
-      totalRecords,
-    };
-  }, [filteredData]);
+    return { totalUnits, totalAmount, totalDiscount, totalRecords };
+  }, [serverMeta, allRecords]);
 
-  const updateFilter = useCallback(<K extends keyof Filters>(key: K, value: Filters[K]) => {
-    setFilters((prev) => ({ ...prev, [key]: value }));
-    setCurrentPage(1);
-  }, []);
+  // When filters change from UI, reset to page 1
+  const updateFilter = useCallback(
+    <K extends keyof Filters>(key: K, value: Filters[K]) => {
+      setFilters((prev) => ({ ...prev, [key]: value }));
+      setCurrentPage(1);
+    },
+    []
+  );
 
   const resetFilters = useCallback(() => {
     setFilters(initialFilters);
     setCurrentPage(1);
   }, []);
 
+  // goToPage triggers server fetch via currentPage change
   const goToPage = useCallback((page: number) => {
-    setCurrentPage(Math.max(1, Math.min(page, totalPages)));
-  }, [totalPages]);
+    setCurrentPage(Math.max(1, page));
+  }, []);
 
+  const totalPages = serverMeta ? serverMeta.totalPages ?? Math.ceil((serverMeta.total ?? 0) / pageSize) : 1;
+
+  // return server page as data; client-side allData kept for backward compatibility (but note: it's only current page's data)
   return {
-    data: paginatedData,
-    allData: sortedData,
+    data: allRecords, // server page rows
+    allData: allRecords,
     filters,
     sortBy,
     currentPage,
@@ -248,8 +246,10 @@ export function useSalesData() {
     updateFilter,
     resetFilters,
     setSortBy,
-  goToPage,
-  refresh,
-  uploadFile,
+    goToPage,
+    refresh,
+    uploadFile,
+    loadingRemote,
+    error,
   };
 }

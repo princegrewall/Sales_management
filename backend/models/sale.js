@@ -1,23 +1,34 @@
 const { Schema, model } = require("mongoose");
 
-const SaleSchema = new Schema(
-  {
-    // add flexible fields matching dataset — use mixed types where necessary
-    customerName: { type: String, index: true },
-    phoneNumber: { type: String, index: true },
-    customerRegion: { type: String, index: true },
-    gender: String,
-    age: Number,
-    productCategory: String,
-    tags: [String],
-    paymentMethod: String,
-    date: { type: Date, index: true },
-    quantity: Number,
-    amount: Number,
-    // allow any other fields
-    raw: { type: Schema.Types.Mixed },
-  },
-  { strict: false, timestamps: false }
-);
+const saleSchema = new Schema({
+  transactionId: String,        
+  date: Date,                  
+  customerId: String,            
+  customerName: String,          
+  phoneNumber: String,          
+  gender: String,                
+  age: Number,                   
+  customerRegion: String,        
+  customerType: String,          
+  productId: String,             
+  productName: String,           
+  brand: String,                 
+  productCategory: String,       
+  //tags: String, 
+  tags: String ,                
+  quantity: Number,              
+  pricePerUnit: Number,         
+  discountPercentage: Number,    
+  totalAmount: Number,           
+  finalAmount: Number,           
+  paymentMethod: String,         
+  orderStatus: String,          
+  deliveryType: String,         
+  storeId: String,               
+  storeLocation: String,         
+  salespersonId: String,         
+  employeeName: String,          
+  createdAt: { type: Date, default: Date.now },
+});
 
-module.exports = model("Sale", SaleSchema);
+module.exports = model("Sale", saleSchema);
