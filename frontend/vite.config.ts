@@ -9,6 +9,11 @@ export default defineConfig(({ mode }) => ({
     host: "::",
     port: 8080,
   },
+  preview: {
+    host: true, // allow external access
+    port: process.env.PORT ? Number(process.env.PORT) : 4173, // use Render's PORT
+    allowedHosts: ["sales-management-4.onrender.com"], // allow your Render hostname
+  },
   plugins: [react(), mode === "development" && componentTagger()].filter(Boolean),
   resolve: {
     alias: {
