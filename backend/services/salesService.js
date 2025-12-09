@@ -15,13 +15,22 @@ function buildFilter(query) {
     ];
   }
 
-  if (query.region) {
-    const regions = utils.splitCSV(query.region).map((s) => s.toLowerCase());
-    filter.customerRegion = { $in: regions };
+  // accept either `region` (singular) or `regions` (plural) from client queries
+  const regionParam = query.region || query.regions;
+  // helper to escape user input for safe regex construction
+  function escapeRegex(str) {
+    return String(str).replace(/[.*+?^${}()|[\\]\\]/g, "\\$&");
   }
+
+  if (regionParam) {
+    // build case-insensitive exact-match regexes so stored values with different casing still match
+    const regions = utils.splitCSV(regionParam);
+    filter.customerRegion = { $in: regions.map((r) => new RegExp(`^${escapeRegex(r)}$`, "i")) };
+  }
+
   if (query.gender) {
-    const genders = utils.splitCSV(query.gender).map((s) => s.toLowerCase());
-    filter.gender = { $in: genders };
+    const genders = utils.splitCSV(query.gender);
+    filter.gender = { $in: genders.map((g) => new RegExp(`^${escapeRegex(g)}$`, "i")) };
   }
 
   const ageMin = utils.toNumber(query.ageMin);
@@ -32,7 +41,7 @@ function buildFilter(query) {
     if (!isNaN(ageMax)) filter.age.$lte = ageMax;
   }
 
-  if (query.category) {
+ /* if (query.category) {
     const cats = utils.splitCSV(query.category).map((s) => s.toLowerCase());
     filter.productCategory = { $in: cats };
   }
@@ -40,7 +49,32 @@ function buildFilter(query) {
   if (query.tags) {
     const tags = utils.splitCSV(query.tags).map((s) => s.toLowerCase());
     filter.tags = { $all: tags };
-  }
+  }*/
+
+    // ✅ PRODUCT CATEGORY (case-insensitive exact match)
+if (query.category) {
+  const cats = utils.splitCSV(query.category);
+
+  filter.productCategory = {
+    $in: cats.map(
+      (c) => new RegExp(`^${escapeRegex(c)}$`, "i")
+    ),
+  };
+}
+
+// ✅ TAGS – match ANY selected tag inside the tags ARRAY
+if (query.tags) {
+  const tags = utils.splitCSV(query.tags);
+
+  filter.tags = {
+    $elemMatch: {
+      $in: tags.map(
+        (t) => new RegExp(`^${escapeRegex(t.trim())}$`, "i")
+      ),
+    },
+  };
+}
+
 
   if (query.paymentMethod) {
     filter.paymentMethod = query.paymentMethod;

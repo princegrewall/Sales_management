@@ -34,7 +34,8 @@ export function SalesTable({ data }: SalesTableProps) {
   const keys = React.useMemo(() => {
     const set = new Set<string>();
     data.slice(0, 50).forEach((row) => Object.keys(row || {}).forEach((k) => set.add(k)));
-    return Array.from(set);
+    // hide internal MongoDB id field from UI
+    return Array.from(set).filter((k) => k !== '_id');
   }, [data]);
 
   return (

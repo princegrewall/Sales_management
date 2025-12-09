@@ -41,31 +41,47 @@ function buildQuery(page: number, pageSize: number, filters: Filters, sortBy: So
   const params = new URLSearchParams();
   params.set('page', String(page));
   params.set('pageSize', String(pageSize));
-  params.set('sort', sortBy);
 
-  if (filters.search) params.set('search', filters.search);
-
-  // arrays -> repeated params: regions=North&regions=South
-  for (const r of filters.regions) params.append('regions', r);
-  for (const g of filters.genders) params.append('genders', g);
-  for (const a of filters.ageRanges) params.append('ageRanges', a);
-  for (const c of filters.categories) params.append('categories', c);
-  for (const t of filters.tags) params.append('tags', t);
-  for (const p of filters.paymentMethods) params.append('paymentMethods', p);
-
-  // Optional: if backend expects numeric range params instead of "ageRanges"
-  // uncomment and adapt if needed (this uses the first selected ageRange)
-  /*
-  if (filters.ageRanges.length > 0) {
-    const { min, max } = parseAgeRange(filters.ageRanges[0]);
-    params.set('ageMin', String(min));
-    params.set('ageMax', String(max));
+  // map frontend sort option like 'date-desc' -> sortBy=date, sortOrder=desc
+  if (sortBy) {
+    const [fieldRaw, order] = sortBy.split('-');
+    const field = fieldRaw === 'name' ? 'customerName' : fieldRaw; // map name -> customerName
+    params.set('sortBy', field);
+    params.set('sortOrder', order || 'desc');
   }
-  */
 
+  // backend expects 'q' for search
+  if (filters.search) params.set('q', filters.search);
+
+  // backend expects CSV values for multi-select filters (e.g. region=North,South)
+  if (filters.regions && filters.regions.length > 0) params.set('region', filters.regions.join(','));
+  if (filters.genders && filters.genders.length > 0) params.set('gender', filters.genders.join(','));
+
+  // age: backend uses ageMin / ageMax. If multiple ranges are selected, compute combined span.
+  if (filters.ageRanges && filters.ageRanges.length > 0) {
+    let min = Number.POSITIVE_INFINITY;
+    let max = Number.NEGATIVE_INFINITY;
+    for (const r of filters.ageRanges) {
+      const p = parseAgeRange(r);
+      if (p.min < min) min = p.min;
+      if (p.max > max) max = p.max;
+    }
+    if (min !== Number.POSITIVE_INFINITY) params.set('ageMin', String(min));
+    if (max !== Number.NEGATIVE_INFINITY) params.set('ageMax', String(max));
+  }
+
+  if (filters.categories && filters.categories.length > 0) params.set('category', filters.categories.join(','));
+  if (filters.tags && filters.tags.length > 0) params.set('tags', filters.tags.join(','));
+
+  // backend expects a single paymentMethod string. Use first selected if multiple.
+  if (filters.paymentMethods && filters.paymentMethods.length > 0) {
+    params.set('paymentMethod', String(filters.paymentMethods[0]));
+  }
+
+  // date range mapping: dateFrom / dateTo
   if (filters.dateRange) {
-    if (filters.dateRange.start) params.set('start', new Date(filters.dateRange.start).toISOString());
-    if (filters.dateRange.end) params.set('end', new Date(filters.dateRange.end).toISOString());
+    if (filters.dateRange.start) params.set('dateFrom', new Date(filters.dateRange.start).toISOString());
+    if (filters.dateRange.end) params.set('dateTo', new Date(filters.dateRange.end).toISOString());
   }
 
   return params.toString();
