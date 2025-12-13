@@ -91,6 +91,7 @@ function buildQuery(page: number, pageSize: number, filters: Filters, sortBy: So
 export function useSalesData() {
   const API_BASE =
     (import.meta.env.VITE_API_URL as string) || 'http://localhost:4000';
+    console.log("API_BASE:", API_BASE);
 
   // Backend state
   const [allRecords, setAllRecords] = useState<SalesRecord[]>([]);
@@ -126,7 +127,10 @@ export function useSalesData() {
         const res = await fetch(`${API_BASE}/api/sales?${qs}`);
         if (!res.ok) throw new Error(`Fetch failed: ${res.status}`);
 
-        const json = await res.json();
+       const text = await res.text();
+        //console.log('RAW RESPONSE:', text);
+        const json = JSON.parse(text);
+
 
         // expecting { meta: {...}, data: [...] } ideally
         if (json && json.meta && Array.isArray(json.data)) {
